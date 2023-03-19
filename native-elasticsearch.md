@@ -135,6 +135,9 @@ GET 1-denormalized/_search
 }
 ```
 
+- Will need to use an additional `filters: {<search filter>}` if we want to return facets only
+  matching query
+
 ### Approach 2: Parent-child model
 
 1. Create index
@@ -256,4 +259,156 @@ GET /1-parentchild/_search
 
 - Does not work
 
+### Approach 3: Partial Normalization
+
+1. Create index
+
+```curl
+PUT /1-partial-normalized
+{
+  "mappings": {
+    "properties":{
+      "person_id": {"type": "keyword"},
+      "person_name": {"type": "text"},
+      "person_description": {"type": "text"},
+      "person_hashtags": {"type": "keyword"},
+      "searchable": {
+        "type": "nested",
+        "properties": {
+           "searchable_field_id": {"type": "keyword"},
+            "searchable_field_section": {"type": "keyword"},
+            "searchable_field_name":  {"type": "keyword"},
+            "searchable_field_value":  {"type": "text"}
+        }
+      }
+    }
+  }
+}
+```
+
+2. Create document
+
+```curl
+POST 1-partial-normalized/_doc
+{
+  "person_id": "1",
+  "person_name": "john doe",
+  "person_description": "this is a test denormalized document descr",
+  "person_hashtags": ["tag1", "tag2"],
+  "searchable":[
+    {
+      "searchable_field_id": "1",
+      "searchable_field_section": "device",
+      "searchable_field_name": "brand",
+      "searchable_field_value": "samsung"
+    },
+    {
+      "searchable_field_id": "2",
+      "searchable_field_section": "device",
+      "searchable_field_name": "os",
+      "searchable_field_value": "iOS"
+    },
+    {
+      "searchable_field_id": "1",
+      "searchable_field_section": "device",
+      "searchable_field_name": "brand",
+      "searchable_field_value": "samsung 23"
+    }
+  ]
+  
+}
+
+```
+
+3. Query on all searchable field values of `samsung`
+
+```curl
+GET 1-partial-normalized/_search
+{
+  "query":{
+    "nested": {
+      "path": "searchable",
+      "query": {
+        "bool": {
+          "must": [
+            {
+              "match": {
+                "searchable.searchable_field_value": "samsung"
+              }
+            }
+          ]
+        }
+      }
+    }    
+  }
+}
+```
+
+- This returns the whole document even though only 2 of 3 searchable fields in `searchable` array
+  matches
+    - There are 2 possible workarounds:
+
+1. Add `inner_hits` where it returns only matched object which we can perform in-application
+   filtering ourselves
+
+```curl
+GET 1-partial-normalized/_search
+{
+  "query":{
+    "nested": {
+      "path": "searchable",
+      "query": {
+        "bool": {
+          "must": [
+            {
+              "match": {
+                "searchable.searchable_field_value": "samsung"
+              }
+            }
+          ]
+        }
+      },
+      "inner_hits": {}
+    }    
+  }
+}
+```
+
+2. Exclude all the nested objects fields in `_source` and only use return results from `inner_hits`
+   to enrich search results
+
+- This would be especially useful when we expect growing `searchable` nested objects
+
+```curl
+GET 1-partial-normalized/_search
+{
+  "_source": {
+    "excludes": ["searchable.*"]
+  }
+  , 
+  "query":{
+    "nested": {
+      "path": "searchable",
+      "query": {
+        "bool": {
+          "must": [
+            {
+              "match": {
+                "searchable.searchable_field_value": "samsung"
+              }
+            }
+          ]
+        }
+      },
+      "inner_hits": {
+        "size": 1,
+        "from": 1
+      }
+    }    
+  }
+} 
+```
+
+- We can also control the number of hits in the `inner_hits` using `size` parameter
+- We can also perform pagination in `inner_hits` using `from` parameter
 
