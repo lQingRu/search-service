@@ -30,12 +30,7 @@
 
 ### Use Case: Global search
 
-To do incremental evaluation, we consider the scenarios in order with the minimal requirements:
-
-- Filters with person's & searchable's fields
-- Sort with person & searchable's fields
-- Group by person
-- Dynamic filters for search results
+To do incremental evaluation, we consider the scenarios in order:
 
 1. Parent and Searchable field scope
 
@@ -57,7 +52,7 @@ To do incremental evaluation, we consider the scenarios in order with the minima
 
 - E.g.: Searchable field as "Phone Number", with context from "Device" and "Phone Number" models
 
-# High-level comparison of approaches for entity relationships
+# High-level comparison of general approaches for entity relationships
 
 ## Approach 1 - Application-side joins: Many-to-Many relationships
 
@@ -111,6 +106,20 @@ To do incremental evaluation, we consider the scenarios in order with the minima
 ## Approach 3 - Nested objects model: One-to-Many relationships
 
 - This is used for multi-valued objects as well
+- Each nested object is indexed as a separate Lucene document i.e. if we have `10` nested objects,
+  there will be `11` documents created
+    - Because of the expense associated with `nested` mappings, ES has settings that we can
+      configure to guard against performance problems (but we will need to then have workaround):
+        - `index.mapping.nested_fields.limit`: maximum number of distinct nested mappings in an
+          index. Default = 50
+        - `index.mapping.nested_objects.limit`: maximum number of nested JSON objects that a single
+          document can contain across all nested types. Default = 10000
+            - Limit prevents out of memory error when document contains too many nested objects
+- To make changes to nested objects, would need to either:
+    - Partial update API
+    - Script
+      update (https://iridakos.com/programming/2019/05/02/add-update-delete-elasticsearch-nested-objects)
+        - Script update allows flexibility, but wary of maintainability and complexity
 
 ### Pros
 
@@ -123,12 +132,18 @@ To do incremental evaluation, we consider the scenarios in order with the minima
 ### Cons
 
 - These nested documents are hidden, i.e. we cannot access/query them directly
-    - Results returned is the whole document
-- To make changes to a nested object, need to reindex the whole document
+    - Will need to use `nested query` or `nested filters`
+    - Complex queries because a special nested query needs to be constructed for search,
+      aggregation, and highlighting
+- Results returned is the whole document
 - Limited to a maximum of 10,000 nested objects per document
 
 ### Conclusion
 
+- "Cross-referencing" nested documents is not feasible
+    - Workaround is to use `include_in_root` that copies the properties from the nested documents
+      into the roots, BUT brings up issues with inner objects (with no boundaries)
+        - BUT this means that all fields in the nested objects are indexed twice
 - Useful if there is one main entity with a limited number of closely related objects (nested
   objects)
 
@@ -136,22 +151,28 @@ To do incremental evaluation, we consider the scenarios in order with the minima
 
 - Similar in nature to the `nested objects model`, but parent and child are completely different
   documents
-- Parent ID needs to be specified when indexing child document
+- Requires 2 additional "metadata":
+    - Field with `join` data type
+    - Extra details about relationship using `relations` object
+- Parent ID needs to be specified when indexing child document because all documents inside a
+  parent-child relationship must be in the same shard
     - Parent ID serves as a routing key
-- Use of `join` field datatype
 
 ### Pros
 
 - Indexing parents is no different from any other documents
-    - Parents do not need to know about their children
-- Fast indexing time
+    - Parents do not need to know about their children, can index separately
+    - Hence fast indexing time
 - Child documents can be changed without affecting the parent or other children
 - Child documents can be returned as a result of a search request
 
 ### Cons
 
 - Parent and all of its children must reside in the same shard and same index
-- Memory needed to keep the mapping of parent and children
+    - Routing key needs to be provided when retrieval, deletion, update of child documents
+- Queries are more expensive and memory-intensive (than nested equivalents)
+    - Each `relation` level adds overhead in terms of processing and memory
+    - Memory needed to keep the mapping of parent and children
 - The more joins we have, the worse performance will be
     - Each generation of parents needs to have their string `_id` fields stored in memory, which
       consume a lot of RAM
@@ -160,17 +181,130 @@ To do incremental evaluation, we consider the scenarios in order with the minima
   parent-child relationships
 - Only one `join` field mapping is allowed per index
 - Cannot specify mappings for `parent` and `child` separately, can only specify the whole index
+- Control over sorting and scoring is limited
+    - Need to use `function_score` and sort by `_score` if we want to sort according to a field in
+      child or parent documents
+- **Can only filter on parent content or child content, BUT not both**
 
 ### Conclusion
 
-- Useful if there are a lot more children than more parents
+- Useful if there are a lot more children than more parents and documents need to be added or
+  changed frequently
 - Useful if index performance is important
+- Multiple levels of parent & child is possible BUT not recommended because of the overhead for
+  creating joins for multiple layers
 - A lot of uncertainties:
     - Is parent and children document treated the same when scoring if we use a default query to
       search across parent & children documents?
     - Are we able to set the number of documents to be returned for children documents?
     - Seems like unable to search against parent & children filters
         - Potentially a dealbreaker
+
+# POC for Global Search
+
+## Must-have features for evaluation
+
+- Search
+    - Base search
+        - Simple string query without filters
+    - Base search & static filter
+        - Static filter here would then refer to category of search (could be a parent or child
+          filter)
+    - Base search & dynamic filters
+        - Dynamic filter: Parent and/or Child
+- Access control
+    - Search
+    - Facets
+    - Sort
+- Sort
+    - First-level sort
+        - Parent or child
+- Pagination
+    - Parent (total number of persons)
+    - Child (total number of hits)
+- Group by Person
+- Highlighting
+    - Parent
+    - Child
+
+## Devil's Advocate: Maintainability
+
+- Search result not grouped by person?
+    - What would be the chance of this?
+- Update person's information
+    - Transfer person to another team
+    - Update field values
+- Transfer device to another person
+
+## Candidates
+
+### 1. Denormalized
+
+- Single flattened index: `denormalized`
+- 1 Document : 1 Searchable Field
+
+### 2. Partial denormalized
+
+- Single grouped index: `partial-denormalized`
+- Possible groupings:
+    - Group by record
+        - Aligns with ACL
+        - Helps with growing size
+        - Mitigation on data duplication
+        - 1 Document: 1 Record : `x` Searchable Fields
+    - Group by person
+        - May be too hard to scale
+        - No data duplication
+        - 1 Document: 1 Person: `n` Records: `z` Searchable Fields
+
+### 3. Parent-child model
+
+- Single independent index: `parent-child`
+    - Parent as a single document, Child as a single document
+
+### 4. Normalized
+
+- At least 2 indexes: `person` (container/parent), `all` (searchable fields)
+
+## Summary
+
+- Not accounting for access control here yet
+
+### Search [Functional]
+
+| Approach | Base Search | Search & Static Filter                                                                                                                                 | Search & Dynamic Filter | 
+| --- |-------------|--------------------------------------------------------------------------------------------------------------------------------------------------------| --- |
+| (1) Denormalized | ✅           | ✅                                                                                                                                                      | ✅ | 
+| (2) Partial denormalized <br/> - Independent of groupings | ✅           | ✅                                                                                                                                                      | ✅ | 
+| (3) Parent-child model | ✅           | ❌ <br/> - Does not work if mix of parent & child filters <br/> - But potentially, can have workaround for static filters to be in parent document only | ❌ <br/> - Does not work if mix of parent & child filters | 
+| (4) Normalized | ✅ | ✅ | ✅ |
+
+### Search [Non-functional]
+
+| Approach | Base Search                                                                                                                             | Search & Static Filter                                                                            | Search & Dynamic Filters         | 
+| --- |-----------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------|----------------------------------|
+| (1) Denormalized | Simple, all first level                                                                                                                 | Additional `filter` parameter(s)                                                                  | No difference from static filter |
+| (2) Partial denormalized | - Requires "`x2`" (depends if ES uses cache well) query for matching nested documents <br/> - Fast query-time joins with `nested query` | Additional `nested` and/or `filter` parameter(s)                                                  | No difference from static filter
+| (3) Parent-child model | More expensive and higher memory intensive than (1) and (2)                                                                             | Additional `filter` parameter(s) in `has_child` or `has_parent` query                             | No difference from static filter |
+| (4) Normalized | Requires in-application joins. <br/> Should be more expensive than (1) and (2)                                                          |  Additional `filter` parameter(s). <br/> - May even be more expensive than (3) depending on the number of calls needed <br/> - Minimally 2 calls for retrieval of parent & child, additional calls needed to fill the "buckets" <br/> - Higher chances that require >2 calls to fill "buckets" | No difference from static filter |
+
+### Sort
+
+| Approach | Parent sort | Child sort | Multiple sorts | Remarks                                                      | 
+| --- | --- | --- | --- |--------------------------------------------------------------| 
+| (1) Denormalized | ✅ | ✅ | ✅ | No difference since flattened. Should be the most performant |
+| (2) Partial denormalized | ✅ | ✅ | ✅ | Child sort will be expensive (??)                            |
+| (3) Parent-child model | ✅ | ✅ | ❌ | Requires custom script (`function_sort`) for sorting         |
+| (4) Normalized | ✅ | ✅ | ✅ | Child to be run before parent | 
+
+### Indexing
+
+| Approach                 | Create Searchable                                                                                                                        | Update Person                                         | Update Searchable                                                             | Delete Person                              | Delete Searchable    |
+|--------------------------|------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------|-------------------------------------------------------------------------------|--------------------------------------------|---|
+| (1) Denormalized         | 💸💸 <br/> In-app enrichment of parent before indexing                                                                                   | 💸💸💸 <br/> Propagate to all children documents      | 💸 <br/> Only a single document affected                                      | 💸💸💸 <br/> All children documents affected | 💸 <br/> Only a single document affected | 
+| (2) Partial-denormalized | 💸 (Subsequent children)  <br/> or  <br/> 💸💸 (First child) <br/> - Caveat: `id` of document is custom (i.e. either `personId` or `recordId`) | 💸 (Group by person)  <br/> or  <br/>💸💸 (Group by record) | 💸 <br/> KIV: May need to verify processing & maintainbility of custom script | 💸 (Group by person) <br/> or  <br/>💸💸 (Group by record) | 💸 <br/> KIV: May need to verify processing & maintainbility of custom script|     
+| (3) Parent-child model   | 💸 <br/> Only a single document affected                                                                                                 | 💸   <br/> or <br/> 💸💸💸 (If merge person)          | 💸  <br/>or  <br/>💸💸💸 (If transfer entity to another person)                           |  💸💸💸 <br/> Propagate to all children documents |  💸 <br/> Only a single document affected|
+| (4) Normalized           | 💸 <br/> Only a single document affected                                                                                                 | 💸  <br/> Only a single document affected             | 💸 <br/> Only a single document affected |  💸💸💸 <br/> All children documents affected | 💸  <br/> Only a single document affected             | 
 
 ## Plan
 
@@ -201,3 +335,5 @@ To do incremental evaluation, we consider the scenarios in order with the minima
 - [Join queries](https://www.elastic.co/guide/en/elasticsearch/reference/current/joining-queries.html)
 - [Handling relationships](https://www.elastic.co/guide/en/elasticsearch/guide/current/relations.html)
 - [Grouping of fields](https://www.elastic.co/guide/en/elasticsearch/guide/current/top-hits.html)
+- [Model relationship using nested objects](https://opster.com/guides/elasticsearch/data-architecture/how-to-model-relationships-between-documents-in-elasticsearch-using-nesting/)
+
