@@ -315,7 +315,29 @@ POST 1-partial-normalized/_doc
       "searchable_field_value": "samsung 23"
     }
   ]
-  
+}
+```
+
+```curl
+POST 1-partial-normalized/_doc
+{
+  "person_id": "2",
+  "person_name": "june",
+  "person_hashtags": [],
+  "searchable":[
+    {
+      "searchable_field_id": "5",
+      "searchable_field_section": "device",
+      "searchable_field_name": "brand",
+      "searchable_field_value": "samsung"
+    },
+    {
+      "searchable_field_id": "6",
+      "searchable_field_section": "device",
+      "searchable_field_name": "os",
+      "searchable_field_value": "iOS"
+    }
+  ]
 }
 
 ```
@@ -401,8 +423,8 @@ GET 1-partial-normalized/_search
         }
       },
       "inner_hits": {
-        "size": 1,
-        "from": 1
+        "size": 5,
+        "from": 0
       }
     }    
   }
@@ -411,4 +433,163 @@ GET 1-partial-normalized/_search
 
 - We can also control the number of hits in the `inner_hits` using `size` parameter
 - We can also perform pagination in `inner_hits` using `from` parameter
+- Need see how scores created, based on this query, both same scores but thought exact search should
+  score more
 
+3. Update person's field(s)
+
+- Use Elasticsearch `update` API
+
+```curl
+POST 1-partial-normalized/_update/OUR2_4YBO5cAWrBZ0YuM
+{
+  "doc": {
+   "person_name": "john tonor" 
+  }
+}
+```
+
+4. Update child's field(s)
+
+```curl
+POST 1-partial-normalized/_update_by_query
+{
+  "query": {
+    "term":{
+      "person_id": 1
+    }
+  }, 
+  "script": {
+    "source": 
+    """
+    def target = ctx._source.searchable.find(search -> search.searchable_field_id == params.searchable_field_id); 
+  if (target != null){
+    target.search.search_field_value = params.searchable_field_value;
+  }
+    
+     """,
+    "params": {
+      "searchable_field_id": 1,
+      "searchable_field_value": "samsung s23"
+    }
+  }
+}
+```
+
+### 3B. Partial Denormalization
+
+1. Create index mapping
+
+```curl 
+PUT /2-partial-normalized
+{
+  "mappings": {
+    "properties":{
+      "person_id": {"type": "keyword"},
+      "person_name": {"type": "text"},
+      "person_description": {"type": "text"},
+      "person_hashtags": {"type": "keyword"},
+      "record_searchable": {
+        "type": "nested",
+        "properties": {
+           "searchable_field_id": {"type": "keyword"},
+            "searchable_field_section": {"type": "keyword"},
+            "searchable_field_name":  {"type": "keyword"},
+            "searchable_field_value":  {"type": "text"}
+        }
+      }
+    }
+  }
+} 
+```
+
+2. Create sample documents
+
+```curl
+POST 2-partial-normalized/_doc
+{
+  "person_id": "2",
+  "person_name": "june",
+  "person_hashtags": [],
+  "record_searchable":[
+    {
+      "searchable_field_id": "1",
+      "searchable_field_section": "identifications",
+      "searchable_field_name": "street address",
+      "searchable_field_value": "compassvale"
+    }
+  ]
+}
+```
+
+```curl
+POST 2-partial-normalized/_doc
+{
+  "person_id": "2",
+  "person_name": "june",
+  "person_hashtags": [],
+  "record_searchable":[
+    {
+      "searchable_field_id": "1",
+      "searchable_field_section": "device",
+      "searchable_field_name": "brand",
+      "searchable_field_value": "samsung"
+    },
+    {
+      "searchable_field_id": "2",
+      "searchable_field_section": "device",
+      "searchable_field_name": "os",
+      "searchable_field_value": "iOS"
+    }
+  ]
+}
+```
+
+- Create another person
+
+```curl
+POST 2-partial-normalized/_doc
+{
+  "person_id": "1",
+  "person_name": "john",
+  "person_hashtags": [],
+  "record_searchable":[
+    {
+      "searchable_field_id": "3",
+      "searchable_field_section": "identifications",
+      "searchable_field_name": "remarks",
+      "searchable_field_value": "compassvale valley"
+    }
+  ]
+}
+```
+
+3. Search and group by person
+
+```curl
+GET 2-partial-normalized/_search
+{
+  "query":{
+    "nested": {
+      "path": "record_searchable",
+      "query": {
+        "bool": {
+          "must": [
+            {
+              "match": {
+                "record_searchable.searchable_field_value": "compassvale"
+              }
+            }
+          ]
+        }
+      }
+    }    
+  },
+  "collapse": {
+    "field": "person_id"
+  }
+} 
+```
+
+- TODO: How to expand out to show `x` number of record_searchable hits apart from using `inner_hits`
+  that caused duplicates

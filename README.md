@@ -330,6 +330,26 @@ To do incremental evaluation, we consider the scenarios in order:
         1. May need to go through the whole list of fields
         2. Access control
 
+## Continue
+
+- Multi-level: Profile > Comms Info > Sel
+- Collapse
+    - "The total number of `hits` in the response indicates the number of matching documents without
+      collapsing. The total number of distinct group is unknown."
+
+## Indexing
+
+### Denormalized
+
+- M1: Retrieve all affected beans from Mongo
+    - Index all based on mongo
+- M2: Update by query
+
+### Partial-normalized
+
+- Versioning?
+- Expanding out nested objects after `collapse` for records
+
 ## Resources
 
 - [Join queries](https://www.elastic.co/guide/en/elasticsearch/reference/current/joining-queries.html)
