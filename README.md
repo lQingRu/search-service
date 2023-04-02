@@ -306,6 +306,107 @@ To do incremental evaluation, we consider the scenarios in order:
 | (3) Parent-child model   | 💸 <br/> Only a single document affected                                                                                                 | 💸   <br/> or <br/> 💸💸💸 (If merge person)          | 💸  <br/>or  <br/>💸💸💸 (If transfer entity to another person)                           |  💸💸💸 <br/> Propagate to all children documents |  💸 <br/> Only a single document affected|
 | (4) Normalized           | 💸 <br/> Only a single document affected                                                                                                 | 💸  <br/> Only a single document affected             | 💸 <br/> Only a single document affected |  💸💸💸 <br/> All children documents affected | 💸  <br/> Only a single document affected             | 
 
+# Deeper-dive into Partial Denormalized vs Fully Denormalized
+
+- Partial here will be grouped by record instead of group by profile as nested fields are stored in
+  the same document (just hidden documents) as the parent, which means a growing size of document
+
+## Core Functionalities
+
+### Search
+
+| Feature | Partial                                                      | Full              | 
+| --- |--------------------------------------------------------------|-------------------| 
+| Group by Profile | `collapse` function                                          | Same as `Partial` |
+| Paginate by Profile | `collapse` does not provide out-of-box distinct group sizes* | Same as `Partial` |
+| Paginate by Search Hits | `collapse`'s `inner_hits.size`                               | Same as `Partial`  |
+
+#### *Paginate by Profile
+
+1. Obtain number of unique groups through aggregations
+2. Update page number, `from`, when `total num of unique groups` > `x+1` * `pageSize` where `x` is
+   current page
+
+### Sorting
+
+| Feature                                                              | Partial                                                                                                                                                                                                                           | Full                                     | 
+|----------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------|
+| Sort by Profile fields                                               | `sort` parameter, flexible                                                                                                                                                                                                        | Same as `Partial`                        |
+| Sort by Child fields or Relevance scoring (`searchable_field_value`) | Complex if partial denormalization is not grouped by profile. <br/> - Not able to perform centralized scoring across all documents within the same profile easily (would need to do in-app comparison between returned documents) | Easy since flattened to just `inner_hits` |
+
+### Add, Change, Delete
+
+| Feature                             | Partial                                                                                                                                     | Full                                              | 
+|-------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------|
+| Changes to searchable field content | 💸💸💸 <br/> To add, change, or delete a nested document, the whole document must be reindexed.* <br/> More nested documents = More costly. | 💸 <br/> Only changes the document affected |
+| Changes to root field content       | 💸💸 <br/> Depending on how many records a profile have since grouped by record                                                             | 💸💸💸 <br/> To propagate changes down to all affected documents |
+
+#### *Change to searchable field content in Nested Data Model
+
+- Table above is in the case of when we use a typical `UPDATE` API by ES which requires a full
+  reindex of document
+- However, if we were to apply partial update, i.e. through scripting, we only require to update the
+  affected nested field
+
+### Access Control
+
+- Assumption here: role-based access control
+- Fields that are needed for evaluation, will need to be tag to each document to simplify search
+
+### Facets
+
+- Does not come out-of-the-box, will require the use of `aggregations`
+- Even with `aggregations`, it will only return based on search hits and not global
+
+| Partial | Full |
+| --- | --- | 
+| Require `nested` and root aggregations | Just `root` aggregations | 
+
+### Advanced / Possible Functionalities
+
+| Feature | Partial              | Full                                                                                                                                                                                     | 
+| --- |----------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------| 
+| Flexibility of search counts per record | 1st level `collapse` | Unless `record` identifier saved in each document. <br/> Still possible if save a field with the combination of `profileId-recordSectionName-recordId` and then `collapse` by this field |
+
+### Conclusion
+
+- Decided to go for `Fully Denormalized` because:
+    - `Partial Denormalized` is down to just `group by record / a level down of profile`
+      because `profile` itself will result rather unbounded list of `searchable fields`
+        - Higher risk of having concurrency issues as well
+    - Given that we are looking at `Partial Denormalized` being at `record` level, the main
+      advantages from it over `Fully Denormalized` is that we don't need to propagate as much when
+      there are profile changes
+        - But we need to also see how frequent these changes are and how much are the overhead
+          actually
+        - Think we shouldn't also do premature optimizations at the expense of complexity and
+          inflexibility
+    - `Partial Denormalized` though may be useful in the future where we may want to group search
+      hits by `record` which may then be quite easily done through `collapsing` and reading from
+      different leveled documents that are already stored in `record` level
+        - But `Fully Denormalized` would likely still be able to achieve through `nested collapsing`
+    - `Partial Denormalized` makes it complex to sort documents within a profile
+        - Given that out-of-the-box, after `collapse` by profile, `record document` are sorted
+          within a profile based on its top hit
+            - However, we are currently interested in just 1st level, i.e. documents within
+              profile (not segregating between records within profile)
+            - But if next time there is a case for this, `Fully Denormalized` would
+              require `nested collapsing` which is still doable
+    - `Partial Denormalized` requires additional configuration to prevent duplicated data (such as
+      from `inner_hits`, `collapse.inner_hits` and `_source`) which were generated because of the
+      need to specify sorting and size for `nested objects` and `within grouped`
+        - This results in additional complexity as well as less readable and maintainable ES APIs
+          used
+    - Because of `nested data structure` in `Partial Denormalized`, it also makes it difficult to
+      perform changes to searchable fields
+        - Though both require `Partial Update API`, in `Partial Denormalized` model, we will need to
+          loop through all nested objects to find the exact object to update
+    - In terms of filtering, sorting, and generating of facets, there are additional complexities
+      with use of `Partial Denormalized`
+        - We will always need to perform at least 2 levels (i.e. root and nested) which are
+          different APIs
+    - Additional storage is also required for storing `nested data structures`
+
 ## Plan
 
 1. Data models

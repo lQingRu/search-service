@@ -259,7 +259,7 @@ GET /1-parentchild/_search
 
 - Does not work
 
-### Approach 3: Partial Normalization
+### Approach 3: Partial Denormalization (Grouped By Profile)
 
 1. Create index
 
@@ -593,3 +593,296 @@ GET 2-partial-normalized/_search
 
 - TODO: How to expand out to show `x` number of record_searchable hits apart from using `inner_hits`
   that caused duplicates
+
+4. Paginate by profiles with facets
+
+```curl
+GET 2-partial-normalized/_search
+{
+  "from": 0, // Make changes to this for paginating profiles
+  "size": 1, 
+  "query":{
+    "nested": {
+      "path": "record_searchable",
+      "query": {
+        "bool": {
+          "must": [
+            {
+              "match": {
+                "record_searchable.searchable_field_value": "compassvale"
+              }
+            }
+          ]
+        }
+      }
+    }    
+  },
+  "collapse": {
+    "field": "person_id"
+  }, 
+   "aggs": {
+    "group_count": {
+      "terms": {
+        "field": "person_id"
+        }
+      },
+    "record_searchable":{
+      "nested": {
+        "path": "record_searchable"
+      },
+      "aggs": {
+        "Field Name Filter": {
+          "terms": {
+            "field": "record_searchable.searchable_field_name",
+            "size": 10
+            }
+          }
+        }
+      }
+    }
+}
+```
+
+5. Paginate by `record_searchable` within the same set of profiles
+
+```curl
+GET 2-partial-normalized/_search
+{
+  "_source": {
+    "excludes": ["record_searchable.*"]
+  },
+  "from": 0,  
+  "query":{
+    "nested": {
+      "path": "record_searchable",
+      "query": {
+        "bool": {
+          "must": [
+            {
+              "match": {
+                "record_searchable.searchable_field_value": "compassvale"
+              }
+            }
+          ]
+        }
+      },
+       "inner_hits": {
+         "size": 1, 
+         "from": 1 // Make changes to this to paginate searchable hits
+      }
+       
+    }    
+  },
+  "collapse": {
+    "field": "person_id"
+    
+  }, 
+   "aggs": {
+    "person_id": {
+      "terms": {
+        "field": "person_id"
+        }
+      },
+    "record_searchable":{
+      "nested": {
+        "path": "record_searchable"
+      },
+      "aggs": {
+        "Field Name Filter": {
+          "terms": {
+            "field": "record_searchable.searchable_field_name",
+            "size": 10
+            }
+          }
+        }
+      }
+    }
+} 
+```
+
+7. Set the number of `record_searchable` hits within a profile & a record
+
+```curl
+GET 2-partial-normalized/_search
+{
+  "_source": {
+    "excludes": ["record_searchable.*"]
+  },
+  "from": 0, 
+  "query":{
+    "nested": {
+      "path": "record_searchable",
+      "query": {
+        "bool": {
+          "must": [
+            {
+              "match": {
+                "record_searchable.searchable_field_value": "compassvale"
+              }
+            }
+          ]
+        }
+      },
+       "inner_hits": {
+         "size": 1
+      }
+       
+    }    
+  },
+  "collapse": {
+    "field": "person_id"
+  }, 
+   "aggs": {
+    "person_id": {
+      "terms": {
+        "field": "person_id"
+        }
+      },
+    "record_searchable":{
+      "nested": {
+        "path": "record_searchable"
+      },
+      "aggs": {
+        "Field Name Filter": {
+          "terms": {
+            "field": "record_searchable.searchable_field_name",
+            "size": 10
+            }
+          }
+        }
+      }
+    }
+} 
+```
+
+8. Set the number of searchable records per profile & per record
+
+```curl
+GET 2-partial-normalized/_search
+{
+ "_source": {
+    "excludes": ["record_searchable.*"]
+  },
+  "from": 0,  
+  "size": 10, 
+  "query":{
+    "nested": {
+      "path": "record_searchable",
+      "query": {
+        "bool": {
+          "must": [
+            {
+              "match": {
+                "record_searchable.searchable_field_value": "compassvale"
+              }
+            }
+          ]
+        }
+      },
+    "inner_hits": {
+         "size": 1, // sets how many searchable fields per record to return (i.e. number of nested elements to return in a document)
+         "from": 0,
+          "sort": {"_score": {"order": "asc"}}
+      }
+    }    
+  },
+  "collapse": {
+    "field": "person_id",
+     "inner_hits": {
+      "name": "record_hits", // set how many records per profile to return (i.e. number of documents grouped by profile to return )
+      "size": 3,
+      "sort": [{"_score": {"order": "asc"}}]
+    }
+  }
+}
+```
+
+9. Add a new searchable field to existing profile and record
+
+```curl
+POST 2-partial-normalized/_update/0urRQIcBG-0whW4Gf0G4
+{
+  "script": {
+    "source": "ctx._source.record_searchable.add(params.searchable)",
+    "params": {
+      "searchable": {
+        "searchable_field_id": "6",
+        "searchable_field_section": "identifications",
+        "searchable_field_name": "remarks",
+        "searchable_field_value": "just opposite compassvale secondary school"
+      }
+    }
+  }
+}
+```
+
+10. Remove a searchable field
+
+```curl
+POST 2-partial-normalized/_update/0urRQIcBG-0whW4Gf0G4
+{
+  "script": {
+    "source": "ctx._source.record_searchable.removeIf(record -> record.searchable_field_id == params.searchable_field_id)",
+    "params": {
+      "searchable_field_id": "65"
+    }
+  }
+} 
+```
+
+11. [Extra] Sort across all `searchable fields` and return top 5 search results (regardless of which
+    profile and which record document)
+
+```curl
+GET 2-partial-normalized/_search
+{
+  "from": 0,  
+  "size": 10, 
+  "sort": [
+    {
+      "_score": {
+        "order": "desc"
+      }
+    }
+  ],
+  "query":{
+    "nested": {
+      "path": "record_searchable",
+      "query": {
+        "bool": {
+          "must": [
+            {
+              "match": {
+                "record_searchable.searchable_field_value": "compassvale"
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "collapse": {
+    "field": "person_id"
+  },
+  "aggs":{
+     "records": {
+          "nested": {
+            "path": "record_searchable"
+          },
+          "aggs": {
+            "top_searchable":{
+            "top_hits": {
+              "sort": [
+                {
+                  "_score": {
+                    "order": "desc"
+                  }
+                }
+              ],
+              "size": 5
+            }
+          }}
+        }
+  }
+}
+```
